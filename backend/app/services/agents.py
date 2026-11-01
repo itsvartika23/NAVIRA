@@ -475,9 +475,92 @@ def match_route_incidents(routes:list[dict[str,Any]],db,now:date|None=None)->dic
   }
  return result
 
-def assess_route_safety(news_evidence:dict[str,Any])->dict[str,Any]:
+WOMENS_SAFETY_AUDIT_DIMENSIONS=(
+ "lighting","openness","visibility","crowd_or_activity","observed_security",
+ "sidewalk_presence","transit_access","gender_diversity","feeling",
+)
+WOMENS_SAFETY_AUDIT_WEIGHTS={name:1/len(WOMENS_SAFETY_AUDIT_DIMENSIONS) for name in WOMENS_SAFETY_AUDIT_DIMENSIONS}
+WOMENS_SAFETY_AUDIT_MAX_AGE_DAYS=180
+WOMENS_SAFETY_AUDIT_MATCH_RADIUS_M=50
+WOMENS_SAFETY_AUDIT_MIN_COVERAGE=.60
+WOMENS_SAFETY_AUDIT_MIN_SEGMENTS=5
+
+def match_route_womens_safety_audits(routes:list[dict[str,Any]],db,now:date|None=None)->dict[str,dict[str,Any]]:
+ """Score a route only from recent, review-approved street-audit observations.
+
+ The index is the equally weighted mean of nine 0–3 audit ratings, scaled to
+ 0–100. It is a route-context index, not a probability or a guarantee. Sparse
+ audits are withheld rather than treated as evidence of safety.
+ """
+ cutoff=(now or date.today()).fromordinal((now or date.today()).toordinal()-WOMENS_SAFETY_AUDIT_MAX_AGE_DAYS).isoformat()
+ columns=", ".join(f"o.{name}" for name in WOMENS_SAFETY_AUDIT_DIMENSIONS)
+ rows=db.execute(
+  "select o.id,o.segment_id,o.observed_at,o.audit_method,o.license,s.geometry_geojson,"+columns+
+  " from street_context_observations o join pedestrian_segments s on s.id=o.segment_id"
+  " join pedestrian_networks n on n.id=s.network_id join sources src on src.id=o.source_id"
+  " where o.review_status='verified' and o.observed_at>=? and o.audit_method<>'' and o.license<>''"
+  " and src.permission_basis<>'' and n.license<>'' order by o.observed_at desc",
+  (cutoff,),
+ ).fetchall()
+ observations=[]; seen_segments=set()
+ for row in rows:
+  if row["segment_id"] in seen_segments: continue
+  try: feature=json.loads(row["geometry_geojson"])
+  except (TypeError,json.JSONDecodeError): continue
+  geometry=feature.get("geometry") if isinstance(feature,dict) and feature.get("type")=="Feature" else feature
+  if not isinstance(geometry,dict) or geometry.get("type")!="LineString": continue
+  ratings={}
+  valid=True
+  for name in WOMENS_SAFETY_AUDIT_DIMENSIONS:
+   try: value=float(row[name])
+   except (TypeError,ValueError): valid=False; break
+   if not math.isfinite(value) or not 0<=value<=3: valid=False; break
+   ratings[name]=value
+  if not valid: continue
+  seen_segments.add(row["segment_id"])
+  observations.append({"id":row["id"],"segment_id":row["segment_id"],"geometry":geometry,"ratings":ratings,"observed_at":row["observed_at"]})
+
+ result={}
+ for route in routes:
+  samples=_sample_route_geometry(route.get("geometry"))
+  matched=[]
+  if samples and observations:
+   for longitude,latitude in samples:
+    nearest=None
+    for observation in observations:
+     distance=distance_to_route_m(latitude,longitude,observation["geometry"])
+     if distance is not None and distance<=WOMENS_SAFETY_AUDIT_MATCH_RADIUS_M and (nearest is None or distance<nearest[0]):
+      nearest=(distance,observation)
+    if nearest: matched.append(nearest[1])
+  unique={item["segment_id"]:item for item in matched}
+  coverage=len(matched)/len(samples) if samples else 0.0
+  enough=coverage>=WOMENS_SAFETY_AUDIT_MIN_COVERAGE and len(unique)>=WOMENS_SAFETY_AUDIT_MIN_SEGMENTS
+  if enough:
+   dimension_scores={name:sum(item["ratings"][name] for item in matched)/len(matched) for name in WOMENS_SAFETY_AUDIT_DIMENSIONS}
+   raw=sum(dimension_scores[name]*WOMENS_SAFETY_AUDIT_WEIGHTS[name] for name in WOMENS_SAFETY_AUDIT_DIMENSIONS)
+   score=round(raw/3*100)
+   status="available"
+   reason="Based on recent, review-approved street audits covering at least 60% of sampled route points and five distinct segments."
+  else:
+   dimension_scores={}
+   score=None
+   status="insufficient_coverage"
+   reason=f"A route score needs recent reviewed audits within {WOMENS_SAFETY_AUDIT_MATCH_RADIUS_M} m of at least 60% of sampled points and at least {WOMENS_SAFETY_AUDIT_MIN_SEGMENTS} distinct route segments."
+  result[str(route.get("id"))]={
+   "status":status,"score":score,"confidence":"coverage-qualified; unvalidated" if enough else "insufficient",
+   "coverage_percent":round(coverage*100),"audited_segments":len(unique),
+   "audit_count":len(matched),"audit_window_days":WOMENS_SAFETY_AUDIT_MAX_AGE_DAYS,
+   "match_radius_m":WOMENS_SAFETY_AUDIT_MATCH_RADIUS_M,
+   "dimensions":dimension_scores,"weights":WOMENS_SAFETY_AUDIT_WEIGHTS,
+   "reason":reason,"source":"review-approved women’s street-context audits",
+  }
+ return result
+
+def assess_route_safety(news_evidence:dict[str,Any],women_safety_audit:dict[str,Any]|None=None)->dict[str,Any]:
  """Return an evidence-gated assessment without converting incomplete data into safety odds."""
  matched=news_evidence.get("matched_incidents")
+ audit=women_safety_audit or {"status":"insufficient_coverage","score":None,"reason":"No recent reviewed women’s street-context audits are available for this route."}
+ audit_ready=audit.get("status")=="available" and isinstance(audit.get("score"),(int,float))
  if news_evidence.get("status")=="geometry_unavailable":
   summary="Insufficient evidence: this route has no usable geometry for incident matching."
  elif matched:
@@ -487,10 +570,12 @@ def assess_route_safety(news_evidence:dict[str,Any])->dict[str,Any]:
  else:
   summary="Insufficient evidence: no eligible, verified, geolocated newspaper sample is available for this route."
  return {
-  "status":"insufficient_evidence",
-  "label":"Insufficient evidence",
+  "status":"provisional_audit_index" if audit_ready else "insufficient_evidence",
+  "label":f"Route audit index {round(audit['score'])}/100 · provisional" if audit_ready else "Insufficient evidence",
   "estimated_safety_percentage":None,
-  "summary":summary,
+  "relative_safety_score":round(audit["score"]) if audit_ready else None,
+  "summary":(f"A provisional NAVIRA route audit index of {round(audit['score'])}/100 is based on recent reviewed street audits. It describes observed route conditions, not the chance of harm, and has not been validated as a predictor." if audit_ready else summary),
+  "women_safety_audit":audit,
   "coverage":{
    "newspaper_incidents":{
     "status":news_evidence.get("status","unavailable"),
@@ -512,18 +597,18 @@ def assess_route_safety(news_evidence:dict[str,Any])->dict[str,Any]:
    },
   },
   "method":{
-   "name":"Evidence-gated route safety assessment",
-   "score_status":"withheld",
-   "features":["verified geolocated newspaper reports","route-compatible official incident rates","fresh route-level traffic observations","geocoded infrastructure audits"],
-   "weights":None,
-   "normalization":"Not applied: the available records lack a route-level incident/exposure denominator and complete, comparable spatial coverage.",
-   "reason":"No numeric score is computed because the available indicators cannot be normalized into a defensible route-safety estimate.",
+   "name":"NAVIRA Women’s Street Audit Index",
+   "score_status":"provisional" if audit_ready else "withheld",
+   "features":list(WOMENS_SAFETY_AUDIT_DIMENSIONS),
+   "weights":WOMENS_SAFETY_AUDIT_WEIGHTS if audit_ready else None,
+   "normalization":"Equal-weight mean of the nine reviewed 0–3 audit ratings, scaled to 0–100. This route-context index is not a probability or guarantee." if audit_ready else "Not applied: no recent reviewed women’s safety audits meet the minimum comparable route coverage gate.",
+   "reason":audit.get("reason") if audit_ready else "No numeric route index is available until recent reviewed audits meet the route coverage threshold.",
   },
   "limitations":[
    "Newspaper reports reflect editorial and source coverage, not total incidents or route exposure.",
    "Delhi City historical totals cannot be assigned to an individual road, route, or locality.",
    "Traffic conditions are shown as separate travel context and are not treated as a safety signal.",
-   "Lighting and pedestrian-activity audits are not available as geocoded route coverage.",
+   "A route audit index describes observed public-space conditions; it cannot guarantee personal safety or predict incidents.",
    "Missing data and no matched reports do not indicate zero incidents or prove safety.",
   ],
  }

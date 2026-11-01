@@ -12,7 +12,7 @@ from pydantic import BaseModel,Field,field_validator
 from typing import Literal
 from backend.app.core import connect,init_db
 from backend.app.services.ncrb_dataset import get_delhi_city_dataset,load_dataset,seed_delhi_city_dataset
-from backend.app.services.agents import quality,validate_official,validate_news,redact,compare,emergency,trends,sanitize,match_route_incidents,assess_route_safety,GeoapifyMotorcycleRouter,OpenRouteServiceWalkingRouter,OSRMRouter
+from backend.app.services.agents import quality,validate_official,validate_news,redact,compare,emergency,trends,sanitize,match_route_incidents,match_route_womens_safety_audits,assess_route_safety,GeoapifyMotorcycleRouter,OpenRouteServiceWalkingRouter,OSRMRouter
 from backend.app.services.geocoding import GeocodingUnavailable,LocationNotFound,geocode_location,search_locations,geocode_incident_location
 from backend.app.services.route_localities import resolve_route_localities
 from backend.scripts.import_osm_pilot_network import seed_pilot_network
@@ -453,7 +453,38 @@ def route_safety_data_status():
   matches=db.execute("select count(*) as n from incident_segment_matches where review_decision='accepted'").fetchone()["n"]
   networks=db.execute("select count(*) as n from pedestrian_networks").fetchone()["n"]
   audited=db.execute("select count(*) as n from street_context_observations").fetchone()["n"]
- return {"status":"available" if matches else "insufficient_data","route_matched_verified_incidents":matches,"verified_incidents":reviewed,"verified_geolocated_places":geolocated,"pedestrian_networks":networks,"street_audit_observations":audited,"aggregate_statistics":aggregates,"risk_estimate":"not_supported","message":"No verified incident-to-pedestrian-segment matches are available. City-level NCRB aggregates and unresolved/locality-only reports are not assigned to route segments." if not matches else "Evidence counts are incomplete indicators, not safety guarantees."}
+  verified_audits=db.execute("select count(*) as n from street_context_observations where review_status='verified'").fetchone()["n"]
+ return {"status":"available" if matches or verified_audits else "insufficient_data","route_matched_verified_incidents":matches,"verified_incidents":reviewed,"verified_geolocated_places":geolocated,"pedestrian_networks":networks,"street_audit_observations":audited,"verified_street_audits":verified_audits,"aggregate_statistics":aggregates,"risk_estimate":"not_supported","women_safety_route_index":"available_when_recent_audit_coverage_threshold_is_met","message":"Women’s route audit indices use only recent review-approved segment audits with sufficient route coverage. News reports and city-level NCRB totals remain separate context and do not create a route risk score."}
+
+def _attach_womens_safety_index(route_result:dict[str,Any])->dict[str,dict[str,Any]]:
+ alternatives=route_result.get("alternatives",[])
+ with connect() as db:
+  incident_evidence=match_route_incidents(alternatives,db)
+  audit_evidence=match_route_womens_safety_audits(alternatives,db)
+ for route in alternatives:
+  route_id=str(route.get("id"))
+  news=incident_evidence.get(route_id,{"status":"insufficient_route_level_evidence","matched_incidents":None,"reports":[]})
+  audit=audit_evidence.get(route_id,{"status":"insufficient_coverage","score":None,"reason":"No reviewed audits cover this route."})
+  route["safety_evidence"]=news
+  route["women_safety_audit"]=audit
+  route["safety_assessment"]=assess_route_safety(news,audit)
+ scored=bool(alternatives) and all(route.get("safety_assessment",{}).get("relative_safety_score") is not None for route in alternatives)
+ route_result["safety_ranking_status"]="available" if scored else "insufficient_audit_coverage"
+ if scored:
+  alternatives.sort(key=lambda item:(-item["safety_assessment"]["relative_safety_score"],item.get("duration_s",1e99),item.get("distance_m",1e99)))
+  route_result["recommendation"]={"route_id":alternatives[0].get("id"),"basis":"Highest NAVIRA Women’s Street Audit Index across all returned options; equal-weighted recent reviewed audit ratings. This is a route-context index, not a guarantee."}
+ elif alternatives:
+  fastest=min(alternatives,key=lambda item:(item.get("duration_s",1e99),item.get("distance_m",1e99)))
+  route_result["recommendation"]={"route_id":fastest.get("id"),"basis":"Fastest provider estimate as a navigation fallback. Recent women’s safety-audit coverage is insufficient to identify a safest route."}
+ else:
+  route_result["recommendation"]=None
+ route_result["safety_ranking_method"]={
+  "name":"NAVIRA Women’s Street Audit Index","status":route_result["safety_ranking_status"],
+  "scale":"0–100 relative route-context index; not a probability of harm",
+  "weights":"Equal weight across nine dimensions: lighting, openness, visibility, crowd/activity, security, walk path, public transport, gender diversity, and feeling of safety.",
+  "minimum_coverage":"Recent (180 days) review-approved audits within 50 m of at least 60% of sampled route points and five distinct route segments.",
+ }
+ return incident_evidence
 
 @app.get("/api/v1/demo/synthetic-data")
 def synthetic_route_demo_data():
@@ -693,19 +724,16 @@ def routes(body:RouteIn):
   key:{name:location[name] for name in ("query","display_name","latitude","longitude","provider") if name in location}
   for key,location in resolved.items()
  }
- with connect() as db:
-  route_evidence=match_route_incidents(route_result.get("alternatives",[]),db)
+ route_evidence=_attach_womens_safety_index(route_result)
  for route in route_result.get("alternatives",[]):
-  news_evidence=route_evidence.get(str(route.get("id")),{
+  news_evidence=route.get("safety_evidence",{
    "status":"insufficient_route_level_evidence","risk_score":None,"matched_incidents":None,"reports":[],
    "reason":"Route geometry is unavailable, so newspaper reports cannot be matched to this option.",
   })
-  route["safety_evidence"]=news_evidence
   route["infrastructure_evidence"]={
    "status":"unavailable",
    "reason":"No geocoded, route-covering lighting or pedestrian-activity audits are configured.",
   }
-  route["safety_assessment"]=assess_route_safety(news_evidence)
  dataset=load_dataset()
  route_result["evidence_context"]={
   "route_specific_news":{
@@ -759,9 +787,11 @@ def walking_route(body:RouteIn):
   if not mappls_service.rest_key(): result["error"]=mappls_service.not_configured_message("Routing")
   result.update({"mode":"walking","provider":"MapmyIndia (Mappls) · walking routing","resolved_locations":locations})
   result["limitations"]=["Walking directions come from MapmyIndia (Mappls). Footpaths, crossings, lighting and current access may differ on the ground; verify local conditions.",*result.get("limitations",[])]
+  _attach_womens_safety_index(result)
   return result
  result.update({"mode":"walking","provider":"openrouteservice · foot-walking","resolved_locations":locations})
  result["limitations"]=["Walking directions use the openrouteservice foot-walking profile. OSM tagging, sidewalks, crossings, accessibility, and current path access may be incomplete; verify local conditions.",*result.get("limitations",[])]
+ _attach_womens_safety_index(result)
  return result
 @app.post("/api/v1/routes/traffic")
 def route_traffic(body:RouteTrafficIn):

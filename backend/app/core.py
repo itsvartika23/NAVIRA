@@ -39,8 +39,9 @@ CREATE TABLE IF NOT EXISTS pedestrian_segments(
  FOREIGN KEY(network_id) REFERENCES pedestrian_networks(id));
 CREATE TABLE IF NOT EXISTS street_context_observations(
  id TEXT PRIMARY KEY,segment_id TEXT NOT NULL,source_id INTEGER NOT NULL,observed_at TEXT NOT NULL,
- lighting TEXT,sidewalk_presence TEXT,crossing TEXT,visibility TEXT,active_frontage TEXT,transit_access TEXT,
- crowd_or_activity TEXT,observed_security TEXT,audit_method TEXT NOT NULL,missingness TEXT,license TEXT NOT NULL,
+ lighting TEXT,openness TEXT,sidewalk_presence TEXT,crossing TEXT,visibility TEXT,active_frontage TEXT,transit_access TEXT,
+ crowd_or_activity TEXT,observed_security TEXT,gender_diversity TEXT,feeling TEXT,
+ audit_method TEXT NOT NULL,review_status TEXT NOT NULL DEFAULT 'needs_review',missingness TEXT,license TEXT NOT NULL,
  FOREIGN KEY(segment_id) REFERENCES pedestrian_segments(id),FOREIGN KEY(source_id) REFERENCES sources(id));
 CREATE TABLE IF NOT EXISTS incident_segment_matches(
  id INTEGER PRIMARY KEY,incident_id TEXT NOT NULL,place_id TEXT NOT NULL,segment_id TEXT NOT NULL,
@@ -76,6 +77,10 @@ def init_db():
   columns={row["name"] for row in db.execute("pragma table_info(news_incidents)")}
   if "latitude" not in columns: db.execute("alter table news_incidents add column latitude REAL")
   if "longitude" not in columns: db.execute("alter table news_incidents add column longitude REAL")
+  audit_columns={row["name"] for row in db.execute("pragma table_info(street_context_observations)")}
+  for name in ("openness","gender_diversity","feeling"):
+   if name not in audit_columns: db.execute(f"alter table street_context_observations add column {name} TEXT")
+  if "review_status" not in audit_columns: db.execute("alter table street_context_observations add column review_status TEXT NOT NULL DEFAULT 'needs_review'")
  from sqlalchemy import create_engine
  from sqlalchemy.engine import URL
  from backend.app.models import Base

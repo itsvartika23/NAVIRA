@@ -7,7 +7,7 @@ import { journeysApi, newsApi, routesApi, syntheticDemoApi } from "../services/a
 const EMPTY_ROUTES = [];
 // Fictional crime-rate examples are for local demos only, never the real Route Planner.
 const SHOW_SYNTHETIC_DEMO = import.meta.env.DEV && import.meta.env.VITE_NAVIRA_SYNTHETIC_DEMO === "true";
-const SAVED_SEARCH_KEY = "navira.routePlanner.last.v1";
+const SAVED_SEARCH_KEY = "navira.routePlanner.last.v2";
 const SAVED_SEARCH_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 
 function loadSavedSearch() {
@@ -465,8 +465,10 @@ export default function RoutePlanner({ authenticated, onRouteContext, onNavigate
 
   function routeLabels(index) {
     const labels = [];
-    if (result?.mode === "walking") return ["Pilot walking path"];
-    if (routes[index]?.id === result?.recommendation?.route_id) labels.push("Recommended by travel time");
+    const recommended = routes[index]?.id === result?.recommendation?.route_id;
+    if (recommended && result?.safety_ranking_status === "available") labels.push("Highest women’s safety audit index");
+    else if (recommended) labels.push("Fastest fallback · safety ranking unavailable");
+    if (result?.mode === "walking") return [...labels, "Walking route"];
     if (index === fastestIndex) labels.push("Fastest route");
     if (index === shortestIndex) labels.push("Shortest route");
     if (labels.length === 0) labels.push("Alternative route");
@@ -496,7 +498,7 @@ export default function RoutePlanner({ authenticated, onRouteContext, onNavigate
       </section>
       <section className="route-results-area">
         <div className="panel map-panel">
-          <div className="panel-heading panel-heading--map"><div><p className="eyebrow">{result?.mode === "walking" ? "WALKING ROUTE MAP" : result?.mode === "motorcycle" ? "MOTORCYCLE ROUTE MAP" : "CAR ROAD MAP"}</p><h2>{result?.provider || "Route map"}</h2></div>{result && <span className={result.provider_status === "provider_configured" ? "status-chip status-chip--green" : "status-chip status-chip--amber"}>{result.provider_status === "provider_fallback" ? "Car-profile fallback · not motorcycle-optimized" : result.provider_status === "provider_configured" ? (result.mode === "walking" ? "Foot-walking route · verify access" : result.mode === "motorcycle" ? "Geoapify motorcycle route · verify access" : "Car road route") : result.provider_status === "unconfigured" ? "Provider setup required" : "Routing unavailable"}</span>}</div>
+          <div className="panel-heading panel-heading--map"><div><p className="eyebrow">{result?.mode === "walking" ? "WALKING ROUTE MAP" : result?.mode === "motorcycle" ? "MOTORCYCLE ROUTE MAP" : "CAR ROAD MAP"}</p><h2>{result?.provider || "Route map"}</h2></div>{result && <span className={result.provider_status === "provider_configured" ? "status-chip status-chip--green" : "status-chip status-chip--amber"}>{result.provider_status === "provider_fallback" ? "Car-profile fallback · not motorcycle-optimized" : result.provider_status === "provider_configured" ? (result.mode === "walking" ? "Foot-walking route · verify access" : result.mode === "motorcycle" ? "Two-wheeler route · verify access" : "Car road route") : result.provider_status === "unconfigured" ? "Provider setup required" : "Routing unavailable"}</span>}</div>
           <MapView center={originPoint || undefined} startPoint={originPoint} endPoint={destinationPoint} startLabel={originLocation?.display_name} endLabel={destinationLocation?.display_name} routes={routes} activeRoute={selected} onRouteSelect={selectRoute} trafficPoints={traffic && !trafficStale ? traffic.points || [] : []} className="route-map"/>
           {result?.error && <Notice kind="warning">We found both locations, but couldn’t get a {result.mode === "walking" ? "walking path" : result.mode === "motorcycle" ? "motorcycle route" : "car road route"}: {result.error}</Notice>}
           {originLocation && destinationLocation && <p className="form-helper">Matched: {originLocation.display_name} → {destinationLocation.display_name}</p>}
@@ -530,13 +532,13 @@ export default function RoutePlanner({ authenticated, onRouteContext, onNavigate
       <div className="panel-heading"><div><p className="eyebrow">AVAILABLE ROUTES</p><h2>{routes.length ? "Compare the returned options" : "No route options returned"}</h2></div><span className="muted-copy">Provider estimates · no live traffic</span></div>
       {routes.length ? <div className="route-option-grid">{routes.map((route, index) =>
         <button key={route.id || index} className={`route-option ${index === selected ? "route-option--selected" : ""}`} disabled={busy} onClick={() => selectRoute(route, index)} aria-pressed={index === selected} aria-label={`Select Route ${index + 1}, ${route.id || `route-${index + 1}`}`}>
-          <span className="route-option__top"><span className="route-number">Route {index + 1} · {route.id || `route-${index + 1}`}</span><span className="route-option__labels">{routeLabels(index).map((label) => <span className={label === "Recommended by travel time" ? "recommended-badge" : "route-label"} key={label}>{label}</span>)}</span></span>
+          <span className="route-option__top"><span className="route-number">Route {index + 1} · {route.id || `route-${index + 1}`}</span><span className="route-option__labels">{routeLabels(index).map((label) => <span className={label.includes("Highest women’s") ? "recommended-badge" : "route-label"} key={label}>{label}</span>)}</span></span>
           <strong>{formatDuration(route.duration_s)}</strong><span>{formatDistance(route.distance_m)}</span>
-          <small>{route.safety_assessment?.label || "Insufficient evidence"} · conditions shown below</small>
+          <small>{route.safety_assessment?.relative_safety_score != null ? `${route.safety_assessment.relative_safety_score}/100 · recent street audit index` : "No comparable women’s safety audit score"} · {route.safety_assessment?.women_safety_audit?.coverage_percent ?? 0}% audited coverage</small>
         </button>,
       )}</div> : <EmptyState title="No route was returned">Check the location text and routing provider.</EmptyState>}
       {routes.length === 1 && <p className="form-helper">{result.maximum_alternatives === 1 ? "NAVIRA requested a maximum of one route." : "The provider returned only one distinct route after duplicate and overlap filtering."} No alternative geometry was fabricated.</p>}
-      {routes.length > 1 && <p className="form-helper">Showing all {routes.length} distinct valid options returned by {result.provider}. Select a card or click its line on the map to choose a route.</p>}
+      {routes.length > 1 && <p className="form-helper">{result.safety_ranking_status === "available" ? `Routes are ordered by the NAVIRA Women’s Street Audit Index. ${result.safety_ranking_method?.weights}` : `The fastest provider route is shown first as a fallback. Recent reviewed women’s safety audits do not cover these routes well enough to identify a safest route.`} Showing all {routes.length} distinct options returned by {result.provider}; select a card or click a line to choose.</p>}
       {!authenticated && routes.length > 0 && <p className="form-helper">Sign in to save your selected route for Journey Companion.</p>}
       {result.limitations?.map((limitation) => <p className="form-helper" key={limitation}>{limitation}</p>)}
     </section>}
@@ -720,7 +722,8 @@ export default function RoutePlanner({ authenticated, onRouteContext, onNavigate
                 <li>Traffic and provider-estimated travel time are context, not personal-safety indicators.</li>
                 <li>Mapped infrastructure is unverified and is not used to calculate a safety assessment.</li>
               </ul>
-              <small>Safety percentage: {assessment.estimated_safety_percentage ?? "Insufficient evidence"}. Missing evidence is not proof of safety.</small>
+              <small>Women’s safety audit index: {assessment.relative_safety_score == null ? "Insufficient audit coverage" : `${assessment.relative_safety_score}/100 (relative route context, not probability)`}. Missing audit or incident data is not proof of safety.</small>
+              {assessment.women_safety_audit && <p>{assessment.women_safety_audit.reason} Audits cover {assessment.women_safety_audit.coverage_percent ?? 0}% of sampled route points across {assessment.women_safety_audit.audited_segments ?? 0} distinct segments. Index weights: equal across lighting, openness, visibility, crowd/activity, security, walk path, public transport, gender diversity, and feeling of safety.</p>}
               {assessment.method && <p>Method: {assessment.method.name}. {assessment.method.reason}</p>}
               {assessment.limitations?.map((limitation) => <small key={limitation}>{limitation}</small>)}
               </details>
