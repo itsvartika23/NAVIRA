@@ -65,3 +65,39 @@ def test_route_weather_validates_coordinates_and_endpoint_is_registered(monkeypa
     monkeypatch.setattr(main, "get_route_weather", lambda coordinates: {"status": "unconfigured"})
     body = main.RouteWeatherIn(coordinates=[[77, 28], [77.1, 28.1]])
     assert main.route_weather(body) == {"status": "unconfigured"}
+
+
+OPEN_METEO = {
+    "utc_offset_seconds": 19800,
+    "current": {"time": 1793340000, "temperature_2m": 24.9, "apparent_temperature": 27.6, "relative_humidity_2m": 67, "wind_speed_10m": 2.9, "weather_code": 61, "is_day": 0},
+    "hourly": {"time": [1793340000 + 3600 * i for i in range(24)], "temperature_2m": [25] * 24,
+               "precipitation_probability": [10] * 3 + [70] + [5] * 20, "weather_code": [0] * 24, "is_day": [1] * 24},
+}
+
+
+def test_open_meteo_returns_the_same_shape_without_a_key():
+    from backend.app.services.weather import OpenMeteoAgent
+    urls = []
+    def fetch(url):
+        urls.append(url)
+        return OPEN_METEO
+    result = OpenMeteoAgent(fetcher=fetch).route_weather([[77.2, 28.6], [77.3, 28.7]])
+    assert result["status"] == "available" and result["provider"] == "Open-Meteo"
+    loc = result["locations"][0]
+    assert loc["current"] == {"temperature_c": 25, "feels_like_c": 28, "humidity_percent": 67, "wind_speed_kmh": 2.9, "condition": "Light rain", "icon": "10n"}
+    assert len(loc["forecast"]) == 8 and loc["forecast"][1]["rain_probability"] == 70
+    assert loc["rain_probability_percent"] == 70 and "appid" not in urls[0]
+
+
+def test_route_weather_falls_back_to_open_meteo(monkeypatch):
+    from backend.app.services import weather
+    monkeypatch.delenv("OPENWEATHER_API_KEY", raising=False)
+    monkeypatch.delenv("NAVIRA_WEATHER_PROVIDER", raising=False)
+    monkeypatch.setattr(weather, "_open_meteo_agent", weather.OpenMeteoAgent(fetcher=lambda url: OPEN_METEO))
+    assert weather.get_route_weather([[77.2, 28.6]])["provider"] == "Open-Meteo"
+
+    def broken(url):
+        raise weather.WeatherUnavailable("OpenWeatherMap rejected the backend API key.")
+    monkeypatch.setenv("OPENWEATHER_API_KEY", "bad")
+    monkeypatch.setattr(weather, "_weather_agent", weather.OpenWeatherAgent(api_key="bad", fetcher=broken))
+    assert weather.get_route_weather([[77.2, 28.6]])["provider"] == "Open-Meteo"
