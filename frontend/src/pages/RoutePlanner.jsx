@@ -5,9 +5,7 @@ import { ROUTE_COLORS } from "../components/routeColors";
 import { journeysApi, newsApi, routesApi, syntheticDemoApi } from "../services/api";
 
 const EMPTY_ROUTES = [];
-// Fictional crime-rate examples are for local demos only, never the real Route Planner.
-const SHOW_SYNTHETIC_DEMO = import.meta.env.DEV && import.meta.env.VITE_NAVIRA_SYNTHETIC_DEMO === "true";
-const SAVED_SEARCH_KEY = "navira.routePlanner.last.v2";
+const SAVED_SEARCH_KEY = "navira.routePlanner.last.v1";
 const SAVED_SEARCH_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 
 function loadSavedSearch() {
@@ -114,7 +112,7 @@ function LocationSearchField({ id, label, value, setValue, onSelect, selected, t
     <div className="input-with-icon"><span className={`location-dot location-dot--${tone}`}/><input id={id} autoComplete="off" role="combobox" aria-autocomplete="list" aria-expanded={suggestions.length > 0} aria-controls={`${id}-suggestions`} value={value} onChange={(event) => { setValue(event.target.value); onSelect(null); }} placeholder={label === "Starting location" ? "Search locality, street, landmark, or full address" : "Search destination, locality, street, or landmark"} minLength={2} maxLength={200} required/></div>
     {selected && <small className="form-helper">Selected location: {selected.display_name}</small>}
     {!selected && value.trim().length > 0 && value.trim().length < 3 && <small className="form-helper">Enter at least 3 characters to search for exact place suggestions.</small>}
-    {!selected && value.trim().length >= 3 && loading && <small className="form-helper" role="status">Searching MapmyIndia places…</small>}
+    {!selected && value.trim().length >= 3 && loading && <small className="form-helper" role="status">Searching OpenStreetMap places…</small>}
     {!selected && value.trim().length >= 3 && error && !loading && <small className="form-helper location-search__message">{error}</small>}
     {!selected && value.trim().length >= 3 && suggestions.length > 0 && <div className="location-suggestions" id={`${id}-suggestions`} role="listbox" aria-label={`${label} suggestions`}>{suggestions.map((place, index) => <button type="button" role="option" aria-selected="false" key={`${place.latitude}-${place.longitude}-${index}`} onClick={() => { setValue(place.display_name); onSelect(place); setSuggestions([]); setError(""); setLoading(false); }}><strong>{place.display_name}</strong><small>{place.place_type}</small></button>)}</div>}
   </div>;
@@ -168,7 +166,7 @@ export default function RoutePlanner({ authenticated, onRouteContext, onNavigate
   }, [origin, destination, mode, originPlace, destinationPlace, modeResults, selected]);
 
   useEffect(() => {
-    if (!SHOW_SYNTHETIC_DEMO || typeof syntheticDemoApi?.get !== "function") return undefined;
+    if (typeof syntheticDemoApi?.get !== "function") return undefined;
     let active = true;
     syntheticDemoApi.get()
       .then((data) => { if (active) setSyntheticDemoData(data); })
@@ -212,7 +210,7 @@ export default function RoutePlanner({ authenticated, onRouteContext, onNavigate
             mode: travelMode,
             alternatives: [],
             provider_status: "unavailable",
-            provider: travelMode === "walking" ? "MapmyIndia (Mappls) · walking routing" : travelMode === "motorcycle" ? "MapmyIndia (Mappls) · two-wheeler routing" : "MapmyIndia (Mappls) · car routing",
+            provider: travelMode === "walking" ? "openrouteservice · foot-walking" : travelMode === "motorcycle" ? "Geoapify motorcycle routing" : "Car routing provider",
             error: requestError.message || "This travel mode could not be checked.",
             limitations: ["No route was returned for this mode; NAVIRA did not substitute another mode."],
           }];
@@ -465,10 +463,8 @@ export default function RoutePlanner({ authenticated, onRouteContext, onNavigate
 
   function routeLabels(index) {
     const labels = [];
-    const recommended = routes[index]?.id === result?.recommendation?.route_id;
-    if (recommended && result?.safety_ranking_status === "available") labels.push("Highest women’s safety audit index");
-    else if (recommended) labels.push("Fastest fallback · safety ranking unavailable");
-    if (result?.mode === "walking") return [...labels, "Walking route"];
+    if (result?.mode === "walking") return ["Pilot walking path"];
+    if (routes[index]?.id === result?.recommendation?.route_id) labels.push("Recommended by travel time");
     if (index === fastestIndex) labels.push("Fastest route");
     if (index === shortestIndex) labels.push("Shortest route");
     if (labels.length === 0) labels.push("Alternative route");
@@ -483,41 +479,43 @@ export default function RoutePlanner({ authenticated, onRouteContext, onNavigate
         <form onSubmit={submit} className="stack-form">
           <label htmlFor="route-mode">Travel mode</label>
           <select id="route-mode" value={mode} onChange={(event) => selectMode(event.target.value)}>
-            <option value="car">Car</option>
-            <option value="walking">Walking</option>
-            <option value="motorcycle">Motorcycle / scooter</option>
+            <option value="car">Car · road routing provider</option>
+            <option value="walking">Walking · openrouteservice foot-walking</option>
+            <option value="motorcycle">Motorcycle · Geoapify motorcycle profile</option>
           </select>
+          {mode === "walking" && <p className="form-helper">Walking directions use openrouteservice's foot-walking profile and require backend-only OPENROUTESERVICE_API_KEY. Routes can be unavailable when the provider key, quota, or walkable network is unavailable. Sidewalk and crossing access is not field-verified.</p>}
+          {mode === "motorcycle" && <p className="form-helper">With backend-only GEOAPIFY_API_KEY, NAVIRA requests Geoapify’s motorcycle profile (not its scooter profile). Without a key, it may show a clearly labeled OSRM car-profile fallback, which is not motorcycle-optimized. Configured provider errors remain unavailable.</p>}
           <LocationSearchField id="route-origin" label="Starting location" value={origin} setValue={setOrigin} onSelect={setOriginPlace} selected={originPlace} tone="start"/>
           <div className="route-connector"/>
           <LocationSearchField id="route-destination" label="Destination location" value={destination} setValue={setDestination} onSelect={setDestinationPlace} selected={destinationPlace} tone="end"/>
           <button className="button button--primary button--wide" type="submit" disabled={busy}>{busy ? <><span className="spinner"/> Comparing travel modes…</> : <>Compare car, motorcycle &amp; walking <span>→</span></>}</button>
         </form>
-        <div className="route-privacy"><span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-11V5l-8-3-8 3v6c0 7 8 11 8 11Z"/><path d="m9 12 2 2 4-4"/></svg></span><p>{mode === "walking" ? "Walking directions come from MapmyIndia (Mappls). Footpaths, crossings, lighting and current access may differ on the ground." : mode === "motorcycle" ? "Two-wheeler routes come from MapmyIndia (Mappls). Follow posted signs and local restrictions." : "Place search and routes come from MapmyIndia (Mappls). Follow current signs and local restrictions."}</p></div>
+        <div className="route-privacy"><span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-11V5l-8-3-8 3v6c0 7 8 11 8 11Z"/><path d="m9 12 2 2 4-4"/></svg></span><p>{mode === "walking" ? "Walking directions use the openrouteservice foot-walking profile. Map data may omit sidewalks, crossings, access restrictions, or current conditions." : mode === "motorcycle" ? "Geoapify motorcycle routing is used when configured. Without a key, an OSRM car-profile fallback may appear; it is not motorcycle-optimized. Follow posted signs and restrictions." : "Place searches use OpenStreetMap Nominatim and car routes use OSRM road-network geometry. Mapped access rules may be incomplete; follow current signs and local restrictions."}</p></div>
         {savedSearch && result === savedSearch.modeResults?.[savedSearch.mode] && <p className="form-helper">Showing your last route search from {new Date(savedSearch.savedAt).toLocaleString()}. Search again for fresh routes.</p>}
         {error && <Notice kind="error">{error}</Notice>}
       </section>
       <section className="route-results-area">
         <div className="panel map-panel">
-          <div className="panel-heading panel-heading--map"><div><p className="eyebrow">{result?.mode === "walking" ? "WALKING ROUTE MAP" : result?.mode === "motorcycle" ? "MOTORCYCLE ROUTE MAP" : "CAR ROAD MAP"}</p><h2>{result?.provider || "Route map"}</h2></div>{result && <span className={result.provider_status === "provider_configured" ? "status-chip status-chip--green" : "status-chip status-chip--amber"}>{result.provider_status === "provider_fallback" ? "Car-profile fallback · not motorcycle-optimized" : result.provider_status === "provider_configured" ? (result.mode === "walking" ? "Foot-walking route · verify access" : result.mode === "motorcycle" ? "Two-wheeler route · verify access" : "Car road route") : result.provider_status === "unconfigured" ? "Provider setup required" : "Routing unavailable"}</span>}</div>
+          <div className="panel-heading panel-heading--map"><div><p className="eyebrow">{result?.mode === "walking" ? "WALKING ROUTE MAP" : result?.mode === "motorcycle" ? "MOTORCYCLE ROUTE MAP" : "CAR ROAD MAP"}</p><h2>{result?.provider || "Route map"}</h2></div>{result && <span className={result.provider_status === "provider_configured" ? "status-chip status-chip--green" : "status-chip status-chip--amber"}>{result.provider_status === "provider_fallback" ? "Car-profile fallback · not motorcycle-optimized" : result.provider_status === "provider_configured" ? (result.mode === "walking" ? "Foot-walking route · verify access" : result.mode === "motorcycle" ? "Geoapify motorcycle route · verify access" : "Car road route") : result.provider_status === "unconfigured" ? "Provider setup required" : "Routing unavailable"}</span>}</div>
           <MapView center={originPoint || undefined} startPoint={originPoint} endPoint={destinationPoint} startLabel={originLocation?.display_name} endLabel={destinationLocation?.display_name} routes={routes} activeRoute={selected} onRouteSelect={selectRoute} trafficPoints={traffic && !trafficStale ? traffic.points || [] : []} className="route-map"/>
           {result?.error && <Notice kind="warning">We found both locations, but couldn’t get a {result.mode === "walking" ? "walking path" : result.mode === "motorcycle" ? "motorcycle route" : "car road route"}: {result.error}</Notice>}
           {originLocation && destinationLocation && <p className="form-helper">Matched: {originLocation.display_name} → {destinationLocation.display_name}</p>}
-          <p className="form-helper">Map, places and routes © MapmyIndia (Mappls). Distances and times are estimates; live traffic is shown separately below.</p>
-          <div className="map-legend route-map-legend">{routes.map((route, index) => <span key={route.id || index}><i style={{ background: selected === index ? "#5637bf" : ROUTE_COLORS[index % ROUTE_COLORS.length] }}/> Route {index + 1}{selected === index ? " · selected" : ""}</span>)}{traffic && !trafficStale && traffic.points?.length > 0 && <span className="traffic-legend"><i className="traffic-dot traffic-dot--light"/> Light <i className="traffic-dot traffic-dot--moderate"/> Moderate <i className="traffic-dot traffic-dot--heavy"/> Heavy</span>}<span className="legend-right">© MapmyIndia (Mappls)</span></div>
+          <p className="form-helper">{result?.mode === "motorcycle" && result?.provider_status === "provider_configured" ? <>Routing © <a href="https://www.geoapify.com/" target="_blank" rel="noreferrer">Geoapify</a>. Map © OpenStreetMap contributors. Geoapify route times are estimates, not live traffic; verify signs and restrictions before travel.</> : <>Map © OpenStreetMap contributors. {result?.mode === "walking" ? "openrouteservice foot-walking distance and duration are estimates; check sidewalk, crossing, accessibility, and current access conditions." : result?.provider_status === "provider_fallback" ? "This displayed line follows OSRM's car profile. It is not motorcycle-optimized and does not verify motorcycle access or restrictions." : result?.mode === "motorcycle" ? "Geoapify motorcycle route geometry and durations are estimates; verify signs and restrictions before travel." : "Road distances and times come from the car-routing provider and do not include live traffic."}</>}</p>
+          <div className="map-legend route-map-legend">{routes.map((route, index) => <span key={route.id || index}><i style={{ background: selected === index ? "#5637bf" : ROUTE_COLORS[index % ROUTE_COLORS.length] }}/> Route {index + 1}{selected === index ? " · selected" : ""}</span>)}{traffic && !trafficStale && traffic.points?.length > 0 && <span className="traffic-legend"><i className="traffic-dot traffic-dot--light"/> Light <i className="traffic-dot traffic-dot--moderate"/> Moderate <i className="traffic-dot traffic-dot--heavy"/> Heavy</span>}<span className="legend-right">© OpenStreetMap</span></div>
         </div>
       </section>
     </div>
     {modeResults && <section className="panel route-options-panel mode-comparison-panel" aria-labelledby="mode-comparison-title">
       <div className="panel-heading"><div><p className="eyebrow">MODE COMPARISON</p><h2 id="mode-comparison-title">Available ways to travel</h2></div><span className="muted-copy">Select a mode to view its route and details</span></div>
       <div className="route-option-grid">{[
-        ["car", "Car", "MapmyIndia car routing"],
-        ["motorcycle", "Motorcycle", "MapmyIndia two-wheeler routing"],
-        ["walking", "Walking", "MapmyIndia walking routing"],
+        ["car", "Car", "Mapped car-road access"],
+        ["motorcycle", "Motorcycle", "Geoapify motorcycle profile or OSRM fallback"],
+        ["walking", "Walking", "openrouteservice foot-walking"],
       ].map(([travelMode, title, accessLabel]) => {
         const modeResult = modeResults[travelMode];
         const modeRoutes = modeResult?.alternatives || [];
         const fastest = modeRoutes.reduce((best, route) => !best || route.duration_s < best.duration_s ? route : best, null);
-        const status = modeRoutes.length ? modeResult?.provider_status === "provider_fallback" ? "OSRM car-profile fallback · not motorcycle-optimized" : travelMode === "walking" ? "Walking route found" : travelMode === "motorcycle" ? "Two-wheeler route found" : "Car route found" : modeResult?.provider_status === "unconfigured" ? "Unavailable · MapmyIndia key not configured" : "Unavailable · no valid route returned";
+        const status = modeRoutes.length ? modeResult?.provider_status === "provider_fallback" ? "OSRM car-profile fallback · not motorcycle-optimized" : travelMode === "walking" ? "Walking route found · access unverified" : travelMode === "motorcycle" ? "Geoapify motorcycle route found · access unverified" : "Car route found · mapped rules only" : modeResult?.provider_status === "unconfigured" ? "Unavailable · provider setup required" : "Unavailable · no valid route returned";
         return <button type="button" key={travelMode} className={`route-option mode-comparison-card ${mode === travelMode ? "route-option--selected" : ""}`} onClick={() => selectMode(travelMode)} aria-pressed={mode === travelMode}>
           <span className="route-option__top"><span className="route-number">{title}</span><span className="route-label">{modeRoutes.length ? `${modeRoutes.length} route${modeRoutes.length === 1 ? "" : "s"}` : "No route"}</span></span>
           <strong>{fastest ? formatDuration(fastest.duration_s) : "—"}</strong>
@@ -532,13 +530,13 @@ export default function RoutePlanner({ authenticated, onRouteContext, onNavigate
       <div className="panel-heading"><div><p className="eyebrow">AVAILABLE ROUTES</p><h2>{routes.length ? "Compare the returned options" : "No route options returned"}</h2></div><span className="muted-copy">Provider estimates · no live traffic</span></div>
       {routes.length ? <div className="route-option-grid">{routes.map((route, index) =>
         <button key={route.id || index} className={`route-option ${index === selected ? "route-option--selected" : ""}`} disabled={busy} onClick={() => selectRoute(route, index)} aria-pressed={index === selected} aria-label={`Select Route ${index + 1}, ${route.id || `route-${index + 1}`}`}>
-          <span className="route-option__top"><span className="route-number">Route {index + 1} · {route.id || `route-${index + 1}`}</span><span className="route-option__labels">{routeLabels(index).map((label) => <span className={label.includes("Highest women’s") ? "recommended-badge" : "route-label"} key={label}>{label}</span>)}</span></span>
+          <span className="route-option__top"><span className="route-number">Route {index + 1} · {route.id || `route-${index + 1}`}</span><span className="route-option__labels">{routeLabels(index).map((label) => <span className={label === "Recommended by travel time" ? "recommended-badge" : "route-label"} key={label}>{label}</span>)}</span></span>
           <strong>{formatDuration(route.duration_s)}</strong><span>{formatDistance(route.distance_m)}</span>
-          <small>{route.safety_assessment?.relative_safety_score != null ? `${route.safety_assessment.relative_safety_score}/100 · recent street audit index` : "No comparable women’s safety audit score"} · {route.safety_assessment?.women_safety_audit?.coverage_percent ?? 0}% audited coverage</small>
+          <small>{route.safety_assessment?.label || "Insufficient evidence"} · conditions shown below</small>
         </button>,
       )}</div> : <EmptyState title="No route was returned">Check the location text and routing provider.</EmptyState>}
       {routes.length === 1 && <p className="form-helper">{result.maximum_alternatives === 1 ? "NAVIRA requested a maximum of one route." : "The provider returned only one distinct route after duplicate and overlap filtering."} No alternative geometry was fabricated.</p>}
-      {routes.length > 1 && <p className="form-helper">{result.safety_ranking_status === "available" ? `Routes are ordered by the NAVIRA Women’s Street Audit Index. ${result.safety_ranking_method?.weights}` : `The fastest provider route is shown first as a fallback. Recent reviewed women’s safety audits do not cover these routes well enough to identify a safest route.`} Showing all {routes.length} distinct options returned by {result.provider}; select a card or click a line to choose.</p>}
+      {routes.length > 1 && <p className="form-helper">Showing all {routes.length} distinct valid options returned by {result.provider}. Select a card or click its line on the map to choose a route.</p>}
       {!authenticated && routes.length > 0 && <p className="form-helper">Sign in to save your selected route for Journey Companion.</p>}
       {result.limitations?.map((limitation) => <p className="form-helper" key={limitation}>{limitation}</p>)}
     </section>}
@@ -722,13 +720,12 @@ export default function RoutePlanner({ authenticated, onRouteContext, onNavigate
                 <li>Traffic and provider-estimated travel time are context, not personal-safety indicators.</li>
                 <li>Mapped infrastructure is unverified and is not used to calculate a safety assessment.</li>
               </ul>
-              <small>Women’s safety audit index: {assessment.relative_safety_score == null ? "Insufficient audit coverage" : `${assessment.relative_safety_score}/100 (relative route context, not probability)`}. Missing audit or incident data is not proof of safety.</small>
-              {assessment.women_safety_audit && <p>{assessment.women_safety_audit.reason} Audits cover {assessment.women_safety_audit.coverage_percent ?? 0}% of sampled route points across {assessment.women_safety_audit.audited_segments ?? 0} distinct segments. Index weights: equal across lighting, openness, visibility, crowd/activity, security, walk path, public transport, gender diversity, and feeling of safety.</p>}
+              <small>Safety percentage: {assessment.estimated_safety_percentage ?? "Insufficient evidence"}. Missing evidence is not proof of safety.</small>
               {assessment.method && <p>Method: {assessment.method.name}. {assessment.method.reason}</p>}
               {assessment.limitations?.map((limitation) => <small key={limitation}>{limitation}</small>)}
               </details>
             </section>
-            {SHOW_SYNTHETIC_DEMO && <section className="route-evidence-panel evidence-card evidence-card--synthetic-demo" aria-label="Synthetic crime-rate examples">
+            <section className="route-evidence-panel evidence-card evidence-card--synthetic-demo" aria-label="Synthetic crime-rate examples">
               <div className="synthetic-demo-banner synthetic-demo-banner--inline" role="alert"><Icon name="report" size={13}/><strong>SYNTHETIC DEMO — NOT REAL SAFETY DATA</strong></div>
               <div className="evidence-card__heading"><span className="evidence-card__icon"><Icon name="report" size={19}/></span><h4>Synthetic crime-rate examples</h4></div>
               <p>Fictional examples shown separately for interface demonstration. They are not mapped to this route or used in its assessment.</p>
@@ -740,7 +737,7 @@ export default function RoutePlanner({ authenticated, onRouteContext, onNavigate
                 <small>{example.example_reports} invented reports ÷ {Number(example.fictional_population).toLocaleString()} fictional residents · {example.period}</small>
               </div>)}
               <small>Invented counts and denominators; not actual crime rates. Changing the route or its locations does not change these examples.</small>
-            </section>}
+            </section>
           </div>
         </article>;
       })}</div>
