@@ -1,4 +1,4 @@
-"""OpenWeatherMap current conditions and short forecast for route samples."""
+"""Route weather: Open-Meteo (no key needed) by default, OpenWeatherMap when a key is set."""
 from __future__ import annotations
 
 import json
@@ -151,15 +151,153 @@ class OpenWeatherAgent:
         }
 
 
+# WMO weather interpretation codes used by Open-Meteo.
+WMO_CODES = {
+    0: ("Clear sky", "01"), 1: ("Mainly clear", "02"), 2: ("Partly cloudy", "03"), 3: ("Overcast", "04"),
+    45: ("Fog", "50"), 48: ("Freezing fog", "50"),
+    51: ("Light drizzle", "09"), 53: ("Drizzle", "09"), 55: ("Heavy drizzle", "09"),
+    56: ("Freezing drizzle", "09"), 57: ("Heavy freezing drizzle", "09"),
+    61: ("Light rain", "10"), 63: ("Rain", "10"), 65: ("Heavy rain", "10"),
+    66: ("Freezing rain", "13"), 67: ("Heavy freezing rain", "13"),
+    71: ("Light snow", "13"), 73: ("Snow", "13"), 75: ("Heavy snow", "13"), 77: ("Snow grains", "13"),
+    80: ("Light rain showers", "09"), 81: ("Rain showers", "09"), 82: ("Violent rain showers", "09"),
+    85: ("Snow showers", "13"), 86: ("Heavy snow showers", "13"),
+    95: ("Thunderstorm", "11"), 96: ("Thunderstorm with hail", "11"), 99: ("Severe thunderstorm with hail", "11"),
+}
+
+
+def describe_wmo(code: Any, is_day: Any = 1) -> tuple[str, str]:
+    try:
+        label, icon = WMO_CODES.get(int(code), ("Unknown", "03"))
+    except (TypeError, ValueError):
+        label, icon = "Unknown", "03"
+    return label, icon + ("d" if is_day in (1, True, None) else "n")
+
+
+class OpenMeteoAgent(OpenWeatherAgent):
+    """Keyless weather from Open-Meteo, returned in the same shape as OpenWeatherAgent."""
+
+    BASE_URL = "https://api.open-meteo.com/v1/forecast"
+    PROVIDER = "Open-Meteo"
+
+    def __init__(self, fetcher: Callable[[str], Any] | None = None):
+        super().__init__(api_key="open-meteo", fetcher=fetcher or self._fetch_open_meteo)
+
+    @staticmethod
+    def _fetch_open_meteo(url: str) -> Any:
+        request = Request(url, headers={"Accept": "application/json", "User-Agent": "NAVIRA/0.1"})
+        try:
+            try:
+                with urlopen(request, timeout=8) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except (URLError, TimeoutError, ConnectionError) as first_error:
+                if isinstance(first_error, HTTPError):
+                    raise
+                time.sleep(0.4)  # one retry for a dropped connection
+                with urlopen(request, timeout=8) as response:
+                    return json.loads(response.read().decode("utf-8"))
+        except HTTPError as error:
+            if error.code == 429:
+                raise WeatherUnavailable("Open-Meteo request limit reached. Try again later.") from error
+            raise WeatherUnavailable(f"Open-Meteo returned HTTP {error.code}.") from error
+        except (URLError, TimeoutError, OSError, json.JSONDecodeError) as error:
+            raise WeatherUnavailable("Open-Meteo could not be reached.") from error
+
+    def _location_weather(self, latitude: float, longitude: float) -> dict[str, Any]:
+        cache_key = f"{latitude:.3f}:{longitude:.3f}"
+        with self._lock:
+            cached = self._cache.get(cache_key)
+            if cached and time.monotonic() - cached[0] < self.CACHE_TTL_SECONDS:
+                return dict(cached[1])
+        query = urlencode({
+            "latitude": f"{latitude:.5f}", "longitude": f"{longitude:.5f}",
+            "current": "temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,weather_code,is_day",
+            "hourly": "temperature_2m,precipitation_probability,weather_code,is_day",
+            "forecast_hours": 24, "wind_speed_unit": "kmh", "timezone": "auto", "timeformat": "unixtime",
+        })
+        data = self.fetcher(f"{self.BASE_URL}?{query}")
+        if not isinstance(data, dict) or data.get("error"):
+            raise WeatherUnavailable(str((data or {}).get("reason") or "Open-Meteo returned an invalid response.") if isinstance(data, dict) else "Open-Meteo returned an invalid response.")
+        current = data.get("current") or {}
+        if not all(isinstance(current.get(f), (int, float)) and math.isfinite(current[f]) for f in ("temperature_2m", "apparent_temperature", "relative_humidity_2m")):
+            raise WeatherUnavailable("Open-Meteo returned incomplete current conditions.")
+        condition, icon = describe_wmo(current.get("weather_code"), current.get("is_day"))
+        hourly = data.get("hourly") or {}
+        times = hourly.get("time") or []
+        offset = int(data.get("utc_offset_seconds") or 0)
+        forecast = []
+        for i in range(0, min(len(times), 24), 3):  # 3-hourly, like OpenWeatherMap's forecast
+            temp = (hourly.get("temperature_2m") or [None] * len(times))[i]
+            if temp is None:
+                continue
+            label, item_icon = describe_wmo((hourly.get("weather_code") or [None] * len(times))[i], (hourly.get("is_day") or [1] * len(times))[i])
+            rain = (hourly.get("precipitation_probability") or [None] * len(times))[i]
+            forecast.append({
+                "time": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(int(times[i]) + offset)),
+                "temperature_c": round(float(temp)),
+                "condition": label,
+                "icon": item_icon,
+                "rain_probability": round(float(rain)) if rain is not None else 0,
+            })
+        payload = {
+            "status": "available",
+            "location": "Route location",
+            "latitude": latitude,
+            "longitude": longitude,
+            "current": {
+                "temperature_c": round(float(current["temperature_2m"])),
+                "feels_like_c": round(float(current["apparent_temperature"])),
+                "humidity_percent": round(float(current["relative_humidity_2m"])),
+                "wind_speed_kmh": round(float(current.get("wind_speed_10m") or 0), 1),
+                "condition": condition,
+                "icon": icon,
+            },
+            "forecast": forecast,
+            "rain_probability_percent": max((item["rain_probability"] for item in forecast), default=None),
+            "alerts": [],
+            "alerts_note": "Official severe-weather alerts are not included; check IMD (mausam.imd.gov.in) for warnings.",
+            "observed_at": current.get("time"),
+            "retrieved_at": time.time(),
+            "provider": self.PROVIDER,
+        }
+        with self._lock:
+            self._cache[cache_key] = (time.monotonic(), payload)
+            if len(self._cache) > 500:
+                self._cache.pop(next(iter(self._cache)))
+        return dict(payload)
+
+    def route_weather(self, coordinates: list[list[float]]) -> dict[str, Any]:
+        result = super().route_weather(coordinates)
+        if result.get("provider") == "OpenWeatherMap":
+            result["provider"] = self.PROVIDER
+            if isinstance(result.get("message"), str):
+                result["message"] = result["message"].replace("OpenWeatherMap", self.PROVIDER)
+        for item in result.get("locations") or []:
+            item["provider"] = self.PROVIDER
+        return result
+
+
 _weather_agent = OpenWeatherAgent()
+_open_meteo_agent = OpenMeteoAgent()
 _agent_lock = threading.Lock()
 
 
 def get_route_weather(coordinates: list[list[float]]) -> dict[str, Any]:
+    """OpenWeatherMap when OPENWEATHER_API_KEY is set and working; otherwise Open-Meteo (no key)."""
     global _weather_agent
+    provider = os.getenv("NAVIRA_WEATHER_PROVIDER", "auto").strip().lower()
+    if provider == "open-meteo":
+        return _open_meteo_agent.route_weather(coordinates)
     api_key = os.getenv("OPENWEATHER_API_KEY", "")
     if _weather_agent.api_key != api_key:
         with _agent_lock:
             if _weather_agent.api_key != api_key:
                 _weather_agent = OpenWeatherAgent(api_key=api_key)
-    return _weather_agent.route_weather(coordinates)
+    if api_key:
+        result = _weather_agent.route_weather(coordinates)
+        if result.get("status") in ("available", "partial") or provider == "openweather":
+            return result
+        logger.warning("OpenWeatherMap failed (%s); falling back to Open-Meteo.", result.get("message"))
+    elif provider == "openweather":
+        return _weather_agent.route_weather(coordinates)
+    return _open_meteo_agent.route_weather(coordinates)
